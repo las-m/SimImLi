@@ -1,7 +1,10 @@
 function result = SimImLi(varargin)
 %% SimulateImaging simulates different effects of the imaging system
-% 
-% TODO: 
+%
+% TODO:
+
+import QMLi.*
+import QMLi.sharedFunctions.*
 
 %% initialize input parser
 p = inputParser;
@@ -10,12 +13,13 @@ p.addParameter('time', 5e-6); % Imaging pulse length in s
 p.addParameter('resolution', 1e-9); % Time resolution of simulation in s
 p.addParameter('verbose', 1); % show results in verbose mode
 p.addParameter('initialDetuning', 0); % detuning to start with in units of gamma
+p.addParameter('Camera', 'Micro');
 p.addParameter('imagingline', 'D2'); % define transition to work on
 p.addParameter('doChirp', [1 0 1.1573]); % do chirp of imaging laser frequency to compensate for the doppler shift
 p.addParameter('ncol', 1e12); % column density in 1/m^2
 p.addParameter('doFullSimulation', false); % do full simulation including a simulation of the density distribution after TOF
-p.addParameter('TOF', 10e-6); % time of flight in s
-p.addParameter('numPart', 1000); % number of particles to simulate 
+p.addParameter('TOF', 0); % time of flight in s
+p.addParameter('numPart', 1000); % number of particles to simulate
 p.addParameter('initWidth', 2e-6); % initial cloud width in m
 
 %% parse results
@@ -32,22 +36,32 @@ TOF = p.Results.TOF;
 doFullSimulation = p.Results.doFullSimulation;
 numPart = p.Results.numPart;
 initWidth = p.Results.initWidth;
+camera = p.Results.Camera;
 
 %% load property files and define properties
-% add matlab library folder to path
-addpath(genpath('Z:\Informatics\Matlab'),'-frozen');
-
-% load all system parameters
-LoadSystemParameters
+% load system parameters for specified camera
+obj = QMLi.record('Camera', camera);
+% select element
+obj.lithium6;
 
 % line used for imaging
-gamma = gamma.(imagingline); % in MHz ? or radian?
-vrecoil = vrecoil.(imagingline);
-f0 = f0.(imagingline);
-
+gamma = obj.DTab.gamma(imagingline); % in MHz ? or radian?
+vrecoil = obj.DTab.vrecoil(imagingline);
+f0 = obj.DTab.f0(imagingline);
+Erec = obj.DTab.Erec(imagingline);
+hbar = obj.hbar;
+Isat = obj.DTab.Isat(imagingline);
+Transmission = obj.Transmission;
+QEfficiency = obj.QEfficiency;
+EffectivePixelArea = obj.EffectivePixelArea;
+DOF = obj.DOF;
+R = obj.R; 
 
 %% perfect chirp
-perfectChirp = 2*Erec.(imagingline)/(hbar*2*pi)*2*pi/2*(s/(1+s+(2*initialDetuning/gamma)^2))*t;
+perfectChirp = 2*Erec/(hbar*2*pi)*2*pi/2*(s/(1+s+(2*initialDetuning/gamma)^2))*t;
+if v
+    sdisp(['Perfect Chirp: ' num2str(perfectChirp, 3) 'MHz/µs']);
+end
 
 %% do actual calculations
 % calculate the number of steps to simulate
@@ -59,7 +73,7 @@ if doChirp(1)
     detuningComp = detuningComp*gamma;
 else
     detuningComp = zeros(timesteps, 1);
-end 
+end
 
 % preallocate memory
 detuning = zeros(timesteps, 1);
@@ -87,20 +101,20 @@ for i = 2:timesteps
     % detuning due to the doppler shift. The initial detuning can be set.
     % See the wiki entry Absorption imaging for more details.
     detuning(i) = detuning(1) - detuningComp(i) + ...
-        2*Erec.(imagingline)/(hbar*2*pi)*photonsscattered(i-1);
+        2*Erec/(hbar*2*pi)*photonsscattered(i-1);
     % scattering rate in dependence of the detuning calculated above
     scatteringrate(i) = gamma*2*pi/2*(s/(1+s+(2*detuning(i)/gamma)^2));
     photonsscattered(i) = photonsscattered(i-1) + scatteringrate(i)*deltat;
     photonsscatteredperpix(i) = photonsscattered(i)*EffectivePixelArea*Transmission*QEfficiency*ncol;
-    photonsdetectedperpix(i) = Isat.(imagingline)*s*i*deltat*EffectivePixelArea/(hbar*2*pi*f0)*Transmission*QEfficiency;
+    photonsdetectedperpix(i) = Isat*s*i*deltat*EffectivePixelArea/(hbar*2*pi*f0)*Transmission*QEfficiency;
     % Change in velocity of the cloud.
     velocity(i) = velocity(i-1) + scatteringrate(i)*deltat*vrecoil;
     position(i) = position(i-1) + velocity(i)*deltat;
     timepassed(i) = (i-1)*deltat;
     randomwalk(i) = sqrt(photonsscattered(i)/3)*vrecoil*timepassed(i);
-
+    
     if doFullSimulation
-        % calculate detuning of single particle 
+        % calculate detuning of single particle
         partDetuning(i,:) = detuning(1) - detuningComp(i) + 1/(lightspeed/f0)*partVelo(i-1);
         % calculate corresponding scattering rage
         partScatteringRate(i,:) = gamma*2*pi/2*(s/(1+s+(2*partDetuning(i)/gamma).^2));
@@ -108,13 +122,20 @@ for i = 2:timesteps
         partPhotonsscattered(i,:) = partPhotonsscattered(i-1) + partScatteringRate(i)*deltat;
         % calculate velocity of particles
         partVelo(i,:) = partVelo(i-1,:) + partScatteringRate(i,:)*deltat*vrecoil + round(rand(numPart,1)*2-1)'.*sqrt(partScatteringRate(i,:)*deltat/3)*vrecoil;
-
+        
         partPos(i,:) = partPos(i-1,:) + partVelo(i,:)*deltat;
     end
 end
 
-if TOF
+if TOF > 0
     partPos(i+1,:) = partPos(i,:) + partVelo(i,:)*TOF;
+    position(i+1) = position(i) + velocity(i)*TOF;
+    velocity(i+1) = velocity(i);
+    timepassed(i+1) = timepassed(i) + TOF;
+    detuning(i+1) = detuning(i);
+    scatteringrate(i+1) = scatteringrate(i);
+    photonsscattered(i+1) = photonsscattered(i);
+    randomwalk(i+1) = sqrt(photonsscattered(i)/3)*vrecoil*timepassed(i+1);
 end
 
 %% plot results if verbose
@@ -123,10 +144,10 @@ if v
         figure(2), hist(partPos(end,:),100);
         xlabel('Binned Particle Distribution after TOF','Interpreter','latex');
         ylabel('Number of Particles per Bin','Interpreter','latex');
-%         for i = 1:timesteps
-%             [cts(i,:), pos(i,:)] = histcounts(partPos(i,:), 50);
-%             ts(i,1:50) = i * deltat;
-%         end
+        %         for i = 1:timesteps
+        %             [cts(i,:), pos(i,:)] = histcounts(partPos(i,:), 50);
+        %             ts(i,1:50) = i * deltat;
+        %         end
     end
     g = figure(1);
     clf;
@@ -142,11 +163,11 @@ if v
     % plot position
     subplot(xmax,ymax,2);
     plot(timepassed*1e6, position*1e6);
-    line([timepassed(1) timepassed(end)]*1e6, [DOF.LargeNA*1e6 DOF.LargeNA*1e6], 'Color', 'red');
-    maxtimepos = timepassed(position > DOF.LargeNA);
+    line([timepassed(1) timepassed(end)]*1e6, [DOF*1e6 DOF*1e6], 'Color', 'red');
+    maxtimepos = timepassed(position > DOF);
     if numel(maxtimepos)
         maxtimepos = maxtimepos(1);
-        line([maxtimepos maxtimepos]*1e6, [0 DOF.LargeNA*1e6], 'Color', 'red');
+        line([maxtimepos maxtimepos]*1e6, [0 DOF*1e6], 'Color', 'red');
     end
     xlabel(xlabeltext,'Interpreter','latex');
     ylabel('Mean position of the atoms [$\mu m$]','Interpreter','latex');
@@ -186,16 +207,16 @@ if v
     set(l, 'Interpreter', 'latex', 'EdgeColor', [1 1 1]);
     
     % plot S/N
-%     subplot(xmax,ymax,7);
-%     plot(timepassed*1e6, photonsscatteredperpix./sqrt(photonsdetectedperpix));
-%     % calculate the point where S/N > 1
-%     maxtimesn = timepassed(photonsscatteredperpix./sqrt(photonsdetectedperpix) > 1);
-%     if maxtimesn
-%         maxtimesn = maxtimesn(1);
-%         line([maxtimesn maxtimesn]*1e6, [0 1], 'Color', 'red');
-%     end
-%     xlabel(xlabeltext,'Interpreter','latex');
-%     ylabel('Signal to noise','Interpreter','latex'); 
+    %     subplot(xmax,ymax,7);
+    %     plot(timepassed*1e6, photonsscatteredperpix./sqrt(photonsdetectedperpix));
+    %     % calculate the point where S/N > 1
+    %     maxtimesn = timepassed(photonsscatteredperpix./sqrt(photonsdetectedperpix) > 1);
+    %     if maxtimesn
+    %         maxtimesn = maxtimesn(1);
+    %         line([maxtimesn maxtimesn]*1e6, [0 1], 'Color', 'red');
+    %     end
+    %     xlabel(xlabeltext,'Interpreter','latex');
+    %     ylabel('Signal to noise','Interpreter','latex');
     
     % display single number results
     h = annotation(g, 'textbox', [0.4 0.05, 0.2, 0.2], 'String', {[num2str(max(photonsscattered(:)),4) ' Photons being scattered per atom'], ...
@@ -207,10 +228,12 @@ if v
         ['Perfect chirp: ' num2str(perfectChirp*gamma*1e-6, 3) '$MHz$ in ' num2str(t*1e6,2) '$\mu s$'], ...
         ['Perfect chirp: ' num2str(perfectChirp, 3) '$\Gamma$ in ' num2str(t*1e6,2) '$\mu s$']}, ...
         'Interpreter', 'Latex', 'LineStyle', 'none', 'FitBoxToText', 'on', 'FontSize', 12);
+    
+    
+    % set to fullscreen
+    set(gcf,'units','normalized','outerposition',[0 0 1 1]);
+    
 end
-
-% set to fullscreen
-set(gcf,'units','normalized','outerposition',[0 0 1 1]);
 
 %% write everything to result variable
 result.velocity = velocity;
